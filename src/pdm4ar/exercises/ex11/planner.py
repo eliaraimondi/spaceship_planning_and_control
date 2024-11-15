@@ -31,7 +31,7 @@ class SolverParameters:
     lambda_nu: float = 1e5  # slack variable weight
     weight_p: NDArray = field(default_factory=lambda: 10 * np.array([[1.0]]).reshape((1, -1)))  # weight for final time
 
-    tr_radius: float = 5  # initial trust region radius
+    tr_radius: float = 5  # initial trust region radius - to be updated during the iterations
     min_tr_radius: float = 1e-4  # min trust region radius
     max_tr_radius: float = 100  # max trust region radius
     rho_0: float = 0.0  # trust region 0
@@ -88,6 +88,7 @@ class SpaceshipPlanner:
 
         # Solver Parameters
         self.params = SolverParameters()
+        self.eta = self.params.tr_radius
 
         # Spaceship Dynamics
         self.spaceship = SpaceshipDyn(self.sg, self.sp)
@@ -114,26 +115,45 @@ class SpaceshipPlanner:
         self.problem = cvx.Problem(objective, constraints)
 
     def compute_trajectory(
-        self, init_state: SpaceshipState, goal_state: DynObstacleState
+        self, init_state: SpaceshipState, goal_state: DynObstacleState, my_tol: float
     ) -> tuple[DgSampledSequence[SpaceshipCommands], DgSampledSequence[SpaceshipState]]:
         """
         Compute a trajectory from init_state to goal_state.
         """
         self.init_state = init_state
         self.goal_state = goal_state
+        self.my_tol = my_tol
 
-        #
         # TODO: Implement SCvx algorithm or comparable
-        #
+        # Iter for the max number of iterations
+        for iteration in range(self.params.max_iterations):
+            print(f"Iteration: {iteration}")
+            # 1. Convexify the dynamic around the current trajectory and assign the values to the problem parameters
+            self._convexification()
+            # 2. Solve the problem
+            try:
+                error = self.problem.solve(verbose=self.params.verbose_solver, solver=self.params.solver)
+            except cvx.SolverError:
+                print(f"SolverError: {self.params.solver} failed to solve the problem.")
+            # 3. Check convergence
+            if self._check_convergence():
+                print("Convergenza raggiunta.")
+                break
+            # 4. Update trust region
+            self._update_trust_region()
 
-        self._convexification()
-        try:
-            error = self.problem.solve(verbose=self.params.verbose_solver, solver=self.params.solver)
-        except cvx.SolverError:
-            print(f"SolverError: {self.params.solver} failed to solve the problem.")
-
-        # Example data: sequence from array
-        mycmds, mystates = self._extract_seq_from_array()
+        # Sequence from an array
+        # 1. Create the timestaps
+        ts = range(self.params.K)
+        # 2. Create the sequences for commands
+        F = self.variables["U"].value[0, :]
+        ddelta = self.variables["U"].value[1, :]
+        cmds_list = [SpaceshipCommands(f, dd) for f, dd in zip(F, ddelta)]
+        mycmds = DgSampledSequence[SpaceshipCommands](timestamps=ts, values=cmds_list)
+        # 3. Create the sequences for states
+        npstates = self.variables["X"].value.T
+        states = [SpaceshipState(*v) for v in npstates]
+        mystates = DgSampledSequence[SpaceshipState](timestamps=ts, values=states)
 
         return mycmds, mystates
 
@@ -173,8 +193,15 @@ class SpaceshipPlanner:
         Define problem parameters for SCvx.
         """
         problem_parameters = {
-            "init_state": cvx.Parameter(self.spaceship.n_x)
-            # ...
+            "init_state": cvx.Parameter(self.spaceship.n_x),
+            "init_input": cvx.Parameter(self.spaceship.n_u),
+            "goal": cvx.Parameter((6, 1)),
+            "tollerance": cvx.Parameter(1),
+            "A_bar": cvx.Parameter((self.spaceship.n_x, self.spaceship.n_x)),
+            "B_plus_bar": cvx.Parameter((self.spaceship.n_x, self.spaceship.n_u)),
+            "B_minus_bar": cvx.Parameter((self.spaceship.n_x, self.spaceship.n_u)),
+            "F_bar": cvx.Parameter((self.spaceship.n_x, 1)),
+            "r_bar": cvx.Parameter((self.spaceship.n_x, 1)),
         }
 
         return problem_parameters
@@ -183,10 +210,51 @@ class SpaceshipPlanner:
         """
         Define constraints for SCvx.
         """
+        coeff_toll_pos: float = 1.0
+        coeff_toll_rot: float = 1.0
+        coeff_toll_vel: float = 1.0
+
         constraints = [
-            self.variables["X"][:, 0] == self.problem_parameters["init_state"],
-            # ...
-        ]
+            self.variables["X"][:, 0] == self.problem_parameters["init_state"],  # initial boundary condition
+            self.variables["U"][:, 0] == self.problem_parameters["init_input"],
+            cvx.norm2(self.variables["X"][:2, -1] - self.problem_parameters["goal"][:2])
+            <= coeff_toll_pos * self.problem_parameters["tollerance"],  # final position boundary condition
+            cvx.norm2(self.variables["X"][2, -1] - self.problem_parameters["goal"][2])
+            <= coeff_toll_rot * self.problem_parameters["tollerance"],  # final orientation boundary condition
+            cvx.norm2(self.variables["X"][3:5, -1] - self.problem_parameters["goal"][3:5])
+            <= coeff_toll_vel * self.problem_parameters["tollerance"],  # final velocity boundary condition
+            cvx.max(self.variables["X"][-1, :] - [self.sp.m_v for _ in range(self.params.K)])
+            >= 0,  # mass boundary condition
+            cvx.min(self.variables["U"][0, :] - [self.sp.thrust_limits[0] for _ in range(self.params.K)])
+            >= 0,  # thrust boundary condition
+            cvx.max(self.variables["U"][0, :] - [self.sp.thrust_limits[1] for _ in range(self.params.K)])
+            <= 0,  # thrust boundary condition
+            cvx.min(self.variables["X"][6, :] - [self.sp.delta_limits[0] for _ in range(self.params.K)])
+            >= 0,  # nozzle angle boundary condition
+            cvx.max(self.variables["X"][6, :] - [self.sp.delta_limits[1] for _ in range(self.params.K)])
+            <= 0,  # nozzle angle boundary condition
+            cvx.min(self.variables["U"][1, :] - [self.sp.ddelta_limits[0] for _ in range(self.params.K)])
+            >= 0,  # nozzle angular velocity boundary condition
+            cvx.max(self.variables["U"][1, :] - [self.sp.ddelta_limits[1] for _ in range(self.params.K)])
+            <= 0,  # nozzle angular velocity boundary condition
+            ] 
+        
+            constraints.append(self.variables["X"][:, k + 1]
+                == self.problem_parameters["A_bar"] @ self.variables["X"][:, k]
+                + self.problem_parameters["B_plus_bar"] @ self.variables["U"][:, k]
+                + self.problem_parameters["B_minus_bar"] @ self.variables["U"][:, k]
+                + self.problem_parameters["F_bar"] @ self.variables["p"]
+                + self.problem_parameters["r_bar"]
+                for k in range(self.params.K - 1)
+              )  # dynamics constraints
+        
+            constraints.append(
+                cvx.norm2(self.variables["X"] - self.X_bar)
+                + cvx.norm2(self.variables["U"] - self.U_bar)
+                + cvx.norm2(self.variables["p"] - self.p_bar)
+                <= self.eta
+            )  # trust region constraint
+        
         return constraints
 
     def _get_objective(self) -> Union[cvx.Minimize, cvx.Maximize]:
@@ -211,35 +279,54 @@ class SpaceshipPlanner:
         )
 
         self.problem_parameters["init_state"].value = self.X_bar[:, 0]
-        # ...
+        self.problem_parameters["init_input"].value = self.U_bar[:, 0]
+        self.problem_parameters["goal"].value = self.goal_state
+        self.problem_parameters["tollerance"].value = self.my_tol
+        self.problem_parameters["A_bar"].value = A_bar
+        self.problem_parameters["B_plus_bar"].value = B_plus_bar
+        self.problem_parameters["B_minus_bar"].value = B_minus_bar
+        self.problem_parameters["F_bar"].value = F_bar
+        self.problem_parameters["r_bar"].value = r_bar
 
     def _check_convergence(self) -> bool:
         """
         Check convergence of SCvx.
         """
+        delta_x = [np.linalg.norm(self.variables["X"].value[:, i] - self.X_bar[:, i]) for i in range(self.params.K)]
+        delta_p = np.linalg.norm(self.variables["P"].value - self.p_bar)
 
-        pass
+        return bool(delta_p + np.max(delta_x) <= self.params.stop_crit)
 
     def _update_trust_region(self):
         """
         Update trust region radius.
         """
-        pass
+        # Compute rho
+        rho: float = self._compute_rho()  # to define
 
-    @staticmethod
-    def _extract_seq_from_array() -> tuple[DgSampledSequence[SpaceshipCommands], DgSampledSequence[SpaceshipState]]:
-        """
-        Example of how to create a DgSampledSequence from numpy arrays and timestamps.
-        """
-        ts = (0, 1, 2, 3, 4)
-        # in case my planner returns 3 numpy arrays
-        F = np.array([0, 1, 2, 3, 4])
-        ddelta = np.array([0, 0, 0, 0, 0])
-        cmds_list = [SpaceshipCommands(f, dd) for f, dd in zip(F, ddelta)]
-        mycmds = DgSampledSequence[SpaceshipCommands](timestamps=ts, values=cmds_list)
+        # Update trust region considering the computed rho
+        if rho < self.params.rho_0:
+            self.eta = max(self.params.min_tr_radius, self.eta / self.params.alpha)
+        elif self.params.rho_0 <= rho < self.params.rho_1:
+            self.eta = max(self.params.min_tr_radius, self.eta / self.params.alpha)
+            self.X_bar = self.variables["X"].value
+            self.U_bar = self.variables["U"].value
+            self.p_bar = self.variables["p"].value
+        elif self.params.rho_1 <= rho < self.params.rho_2:
+            self.X_bar = self.variables["X"].value
+            self.U_bar = self.variables["U"].value
+            self.p_bar = self.variables["p"].value
+        else:
+            self.eta = min(self.params.max_tr_radius, self.params.beta * self.eta)
+            self.X_bar = self.variables["X"].value
+            self.U_bar = self.variables["U"].value
+            self.p_bar = self.variables["p"].value
 
-        # in case my state trajectory is in a 2d array
-        npstates = np.random.rand(len(ts), 8)
-        states = [SpaceshipState(*v) for v in npstates]
-        mystates = DgSampledSequence[SpaceshipState](timestamps=ts, values=states)
-        return mycmds, mystates
+    def _compute_rho(self) -> float:
+        """
+        Compute rho for trust region update.
+        """
+        # Compute rho
+        rho: float = 0.0  # to define
+
+        return rho
