@@ -79,7 +79,9 @@ class SpaceshipAgent(Agent):
         # TODO: Implement Compute Initial Trajectory
         #
 
-        self.cmds_plan, self.state_traj = self.planner.compute_trajectory(self.init_state, self.goal_state)
+        self.cmds_plan, self.state_traj = self.planner.compute_trajectory(
+            self.init_state, self.goal_state, my_tol=self.parameters.my_tol
+        )
 
     def get_commands(self, sim_obs: SimObservations) -> SpaceshipCommands:
         """
