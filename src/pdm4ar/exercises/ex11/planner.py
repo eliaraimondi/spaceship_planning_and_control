@@ -207,6 +207,10 @@ class SpaceshipPlanner:
             "B_minus_bar": cvx.Parameter((self.n_x * self.n_u, self.params.K - 1)),
             "F_bar": cvx.Parameter((self.spaceship.n_x * self.n_p, self.params.K - 1)),
             "r_bar": cvx.Parameter((self.spaceship.n_x, self.params.K - 1)),
+            "eta": cvx.Parameter(),
+            "X_bar": cvx.Parameter((self.n_x, self.params.K)),
+            "U_bar": cvx.Parameter((self.n_u, self.params.K)),
+            "p_bar": cvx.Parameter(self.n_p),
         }
 
         return problem_parameters
@@ -219,8 +223,6 @@ class SpaceshipPlanner:
         coeff_toll_rot: float = 1.0
         coeff_toll_vel: float = 1.0
         coeff_toll_ang_vel: float = 1.0
-        a = self.variables["X"][:2, -1]
-        b = self.problem_parameters["goal"][:2]
 
         constraints = []
         constraints.append(
@@ -268,10 +270,10 @@ class SpaceshipPlanner:
             )  # dynamics constraints
 
         constraints.append(
-            cvx.norm(self.variables["X"] - self.X_bar)
-            + cvx.norm(self.variables["U"] - self.U_bar)
-            + cvx.norm(self.variables["p"] - self.p_bar)
-            <= self.eta
+            cvx.norm(self.variables["X"] - self.problem_parameters["X_bar"])
+            + cvx.norm(self.variables["U"] - self.problem_parameters["U_bar"])
+            + cvx.norm(self.variables["p"] - self.problem_parameters["p_bar"])
+            <= self.problem_parameters["eta"]
         )  # trust region constraint
 
         return constraints
@@ -307,6 +309,10 @@ class SpaceshipPlanner:
         self.problem_parameters["B_minus_bar"].value = B_minus_bar
         self.problem_parameters["F_bar"].value = F_bar
         self.problem_parameters["r_bar"].value = r_bar
+        self.problem_parameters["eta"].value = self.eta
+        self.problem_parameters["X_bar"].value = self.X_bar
+        self.problem_parameters["U_bar"].value = self.U_bar
+        self.problem_parameters["p_bar"].value = self.p_bar
 
     def _check_convergence(self) -> bool:
         """
