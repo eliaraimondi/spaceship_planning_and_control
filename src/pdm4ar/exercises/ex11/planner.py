@@ -166,7 +166,7 @@ class SpaceshipPlanner:
 
         X = np.ones((self.spaceship.n_x, K))
         U = np.zeros((self.spaceship.n_u, K))
-        p = np.zeros((self.spaceship.n_p))
+        p = np.zeros((self.spaceship.n_p)) + 30
 
         return X, U, p
 
@@ -229,27 +229,25 @@ class SpaceshipPlanner:
         coeff_toll_ang_vel: float = 1.0
 
         constraints = []
-        constraints.append(self.variables["U"][:, 0] == np.zeros((self.n_u, 1)))  # initial control condition
-        constraints.append(
-            self.variables["U"][:, self.params.K] == np.zeros((self.n_u, 1))
-        )  # terminal control condition
+        constraints.append(self.variables["U"][:, 0] == np.zeros((self.n_u)))  # initial control condition
+        constraints.append(self.variables["U"][:, -1] == np.zeros((self.n_u)))  # terminal control condition
         constraints.append(
             self.variables["X"][:, 0] - self.problem_parameters["init_state"] + self.variables["nu_ic"][:, 0] == 0
         )  # initial boundary condition
         constraints.append(
             cvx.sum_squares(self.variables["X"][:2, -1] - self.problem_parameters["goal"][:2])
             + self.variables["nu_tc"][:2, 0]
-            < (coeff_toll_pos * self.problem_parameters["tollerance"]) ** 2
+            <= (coeff_toll_pos * self.problem_parameters["tollerance"]) ** 2
         )  # final position boundary condition
         constraints.append(
             cvx.sum_squares(self.variables["X"][2, -1] - self.problem_parameters["goal"][2])
             + self.variables["nu_tc"][2, 0]
-            < (coeff_toll_rot * self.problem_parameters["tollerance"]) ** 2
+            <= (coeff_toll_rot * self.problem_parameters["tollerance"]) ** 2
         )  # final orientation boundary condition
         constraints.append(
             cvx.sum_squares(self.variables["X"][3:5, -1] - self.problem_parameters["goal"][3:5])
             + self.variables["nu_tc"][3:5, 0]
-            < (coeff_toll_vel * self.problem_parameters["tollerance"]) ** 2
+            <= (coeff_toll_vel * self.problem_parameters["tollerance"]) ** 2
         )  # final speed boundary condition
         constraints.append(
             cvx.sum_squares(self.variables["X"][5, -1] - self.problem_parameters["goal"][5])
@@ -314,7 +312,7 @@ class SpaceshipPlanner:
         # Compute trapezoidal integration
         delta_t = self.variables["p"] / self.params.K
         gamma = 0
-        for k in range(self.params.K - 1):
+        for k in range(self.params.K - 2):
             gamma += delta_t / 2 * (gamma_lambda[k] + gamma_lambda[k + 1])
 
         # Define objective
