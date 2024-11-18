@@ -25,7 +25,7 @@ class SolverParameters:
     """
 
     # Cvxpy solver parameters
-    solver: str = "SCS"  # specify solver to use
+    solver: str = "ECOS"  # specify solver to use
     verbose_solver: bool = False  # if True, the optimization steps are shown
     max_iterations: int = 100  # max algorithm iterations
 
@@ -165,8 +165,8 @@ class SpaceshipPlanner:
         K = self.params.K
 
         X = np.ones((self.spaceship.n_x, K))
-        U = np.ones((self.spaceship.n_u, K))
-        p = np.ones((self.spaceship.n_p))
+        U = np.zeros((self.spaceship.n_u, K))
+        p = np.zeros((self.spaceship.n_p))
 
         return X, U, p
 
@@ -185,6 +185,10 @@ class SpaceshipPlanner:
             "X": cvx.Variable((self.spaceship.n_x, self.params.K)),
             "U": cvx.Variable((self.spaceship.n_u, self.params.K)),
             "p": cvx.Variable(self.spaceship.n_p),
+            "nu": cvx.Variable((self.spaceship.n_x, self.params.K - 1)),
+            # "nu_s": ..., # to define
+            "nu_ic": cvx.Variable((self.spaceship.n_x, 1)),
+            "nu_tc": cvx.Variable((self.spaceship.n_x - 2, 1)),
         }
 
         self.n_x = self.spaceship.n_x
@@ -225,25 +229,32 @@ class SpaceshipPlanner:
         coeff_toll_ang_vel: float = 1.0
 
         constraints = []
+        constraints.append(self.variables["U"][:, 0] == np.zeros((self.n_u, 1)))  # initial control condition
         constraints.append(
-            self.variables["X"][:, 0] == self.problem_parameters["init_state"]
+            self.variables["U"][:, self.params.K] == np.zeros((self.n_u, 1))
+        )  # terminal control condition
+        constraints.append(
+            self.variables["X"][:, 0] - self.problem_parameters["init_state"] + self.variables["nu_ic"][:, 0] == 0
         )  # initial boundary condition
-        constraints.append(self.variables["U"][:, 0] == self.problem_parameters["init_input"])
         constraints.append(
-            cvx.norm(self.variables["X"][:2, -1] - self.problem_parameters["goal"][:2])
-            <= coeff_toll_pos * self.problem_parameters["tollerance"]
+            cvx.sum_squares(self.variables["X"][:2, -1] - self.problem_parameters["goal"][:2])
+            + self.variables["nu_tc"][:2, 0]
+            < (coeff_toll_pos * self.problem_parameters["tollerance"]) ** 2
         )  # final position boundary condition
         constraints.append(
-            cvx.norm(self.variables["X"][2, -1] - self.problem_parameters["goal"][2])
-            <= coeff_toll_rot * self.problem_parameters["tollerance"]
+            cvx.sum_squares(self.variables["X"][2, -1] - self.problem_parameters["goal"][2])
+            + self.variables["nu_tc"][2, 0]
+            < (coeff_toll_rot * self.problem_parameters["tollerance"]) ** 2
         )  # final orientation boundary condition
         constraints.append(
-            cvx.norm(self.variables["X"][3:5, -1] - self.problem_parameters["goal"][3:5])
-            <= coeff_toll_vel * self.problem_parameters["tollerance"]
+            cvx.sum_squares(self.variables["X"][3:5, -1] - self.problem_parameters["goal"][3:5])
+            + self.variables["nu_tc"][3:5, 0]
+            < (coeff_toll_vel * self.problem_parameters["tollerance"]) ** 2
         )  # final speed boundary condition
         constraints.append(
-            cvx.norm(self.variables["X"][5, -1] - self.problem_parameters["goal"][5])
-            <= coeff_toll_ang_vel * self.problem_parameters["tollerance"]
+            cvx.sum_squares(self.variables["X"][5, -1] - self.problem_parameters["goal"][5])
+            + self.variables["nu_tc"][5, 0]
+            <= (coeff_toll_ang_vel * self.problem_parameters["tollerance"]) ** 2
         )  # final angular speed boundary condition
         for k in range(self.params.K):
             constraints.append(self.variables["X"][7, k] >= self.sg.m)  # mass boundary condition
@@ -266,13 +277,14 @@ class SpaceshipPlanner:
                     @ self.variables["U"][:, k]
                     + cvx.reshape(self.problem_parameters["F_bar"][:, k], (self.n_x, self.n_p)) @ self.variables["p"]
                     + self.problem_parameters["r_bar"][:, k]
+                    + self.variables["nu"][:, k]
                 )
             )  # dynamics constraints
 
         constraints.append(
-            cvx.norm(self.variables["X"] - self.problem_parameters["X_bar"])
-            + cvx.norm(self.variables["U"] - self.problem_parameters["U_bar"])
-            + cvx.norm(self.variables["p"] - self.problem_parameters["p_bar"])
+            cvx.sum_squares(self.variables["X"] - self.problem_parameters["X_bar"])
+            + cvx.sum_squares(self.variables["U"] - self.problem_parameters["U_bar"])
+            + cvx.sum_squares(self.variables["p"] - self.problem_parameters["p_bar"])
             <= self.problem_parameters["eta"]
         )  # trust region constraint
 
@@ -282,8 +294,31 @@ class SpaceshipPlanner:
         """
         Define objective for SCvx.
         """
-        # Example objective
-        objective = self.params.weight_p @ self.variables["p"]
+        # Define terminal cost penalized
+        phi_lambda = (
+            self.params.weight_p @ self.variables["p"]
+            + self.params.lambda_nu * cvx.norm(self.variables["nu_ic"][:, 0])
+            + self.params.lambda_nu * cvx.norm(self.variables["nu_tc"][:, 0])
+        )
+
+        # Define gamma lambda
+        gamma_lambda = []
+        for k in range(self.params.K - 1):
+            gamma_lambda.append(self.params.lambda_nu * cvx.norm(self.variables["nu"][:, k]))
+            # gamma_lambda.append(
+            #    self.params.lambda_nu
+            #    * cvx.norm(self.variables["nu"][:, k] + self.params.lambda_nu * cvx.norm(self.variables["nu_s"][:, k]))
+            # )
+        # gamma_lambda.append(self.params.lambda_nu * cvx.norm(self.variables["nu_s"][:, self.params.K]))
+
+        # Compute trapezoidal integration
+        delta_t = self.variables["p"] / self.params.K
+        gamma = 0
+        for k in range(self.params.K - 1):
+            gamma += delta_t / 2 * (gamma_lambda[k] + gamma_lambda[k + 1])
+
+        # Define objective
+        objective = phi_lambda + gamma
 
         return cvx.Minimize(objective)
 
@@ -301,7 +336,6 @@ class SpaceshipPlanner:
 
         # Populate Problem Parameters
         self.problem_parameters["init_state"].value = self.init_state.as_ndarray()
-        self.problem_parameters["init_input"].value = self.U_bar[:, 0]
         self.problem_parameters["goal"].value = self.goal_state.as_ndarray()
         self.problem_parameters["tollerance"].value = self.my_tol
         self.problem_parameters["A_bar"].value = A_bar
@@ -319,7 +353,7 @@ class SpaceshipPlanner:
         Check convergence of SCvx.
         """
         delta_x = [np.linalg.norm(self.variables["X"].value[:, i] - self.X_bar[:, i]) for i in range(self.params.K)]
-        delta_p = np.linalg.norm(self.variables["P"].value - self.p_bar)
+        delta_p = np.linalg.norm(self.variables["p"].value - self.p_bar)
 
         return bool(delta_p + np.max(delta_x) <= self.params.stop_crit)
 
