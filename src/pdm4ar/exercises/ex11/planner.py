@@ -25,7 +25,7 @@ class SolverParameters:
 
     # Cvxpy solver parameters
     solver: str = "ECOS"  # specify solver to use
-    verbose_solver: bool = True  # if True, the optimization steps are shown
+    verbose_solver: bool = False  # if True, the optimization steps are shown
     max_iterations: int = 100  # max algorithm iterations
 
     # SCVX parameters (Add paper reference)
@@ -47,8 +47,8 @@ class SolverParameters:
     stop_crit: float = 1e-5  # Stopping criteria constant
 
     # Time limits
-    max_time: float = 60.0  # max time for the algorithm
-    min_time: float = 10.0  # min time for the algorithm
+    max_time: float = 80.0  # max time for the algorithm
+    min_time: float = 0.0  # min time for the algorithm
 
 
 class SpaceshipPlanner:
@@ -148,13 +148,19 @@ class SpaceshipPlanner:
                 print("Il problema NON è DPP.")"""
 
             # 2. Solve the problem
-            """
+
             check_for_nan_and_inf(self.problem_parameters["A_bar"].value, "A_bar")
             check_for_nan_and_inf(self.problem_parameters["B_plus_bar"].value, "B_plus_bar")
             check_for_nan_and_inf(self.problem_parameters["B_minus_bar"].value, "B_minus_bar")
             check_for_nan_and_inf(self.problem_parameters["F_bar"].value, "F_bar")
             check_for_nan_and_inf(self.problem_parameters["r_bar"].value, "r_bar")
-            """
+
+            # Print A_bar, B_plus_bar, B_minus_bar, F_bar, r_bar
+            print(f"A_bar: {self.problem_parameters['A_bar'].value}")
+            print(f"B_plus_bar: {self.problem_parameters['B_plus_bar'].value}")
+            print(f"B_minus_bar: {self.problem_parameters['B_minus_bar'].value}")
+            print(f"F_bar: {self.problem_parameters['F_bar'].value}")
+            print(f"r_bar: {self.problem_parameters['r_bar'].value}")
 
             try:
                 self.error = self.problem.solve(
@@ -171,6 +177,7 @@ class SpaceshipPlanner:
             # 4. Update trust region
             self._update_trust_region()
 
+        # self._unnormalize_variables()
         mycmds, mystates = self._sequence_from_array()
 
         return mycmds, mystates
@@ -262,41 +269,17 @@ class SpaceshipPlanner:
         constraints.append(self.variables["U"][:, -1] == np.zeros(self.n_u))  # terminal control condition
 
         # BOUDARY CONDITIONS
-        constraints.append(
-            self.variables["X"][:, 0] - self.problem_parameters["init_state"] + self.variables["nu_ic"][:] == 0
-        )  # initial boundary condition
-        constraints.append(
-            self.variables["X"][:2, -1] - self.problem_parameters["goal"][:2] + self.variables["nu_tc"][:2]
-            <= (coeff_toll_pos * self.problem_parameters["tollerance"])
-        )  # final position boundary condition
-        constraints.append(
-            self.variables["X"][:2, -1] - self.problem_parameters["goal"][:2] + self.variables["nu_tc"][:2]
-            >= -(coeff_toll_pos * self.problem_parameters["tollerance"])
-        )  # final position boundary condition
-        constraints.append(
-            self.variables["X"][2, -1] - self.problem_parameters["goal"][2] + self.variables["nu_tc"][2]
-            <= (coeff_toll_rot * self.problem_parameters["tollerance"])
-        )  # final orientation boundary condition
-        constraints.append(
-            self.variables["X"][2, -1] - self.problem_parameters["goal"][2] + self.variables["nu_tc"][2]
-            >= -(coeff_toll_rot * self.problem_parameters["tollerance"])
-        )
-        constraints.append(
-            self.variables["X"][3:5, -1] - self.problem_parameters["goal"][3:5] + self.variables["nu_tc"][3:5]
-            <= (coeff_toll_vel * self.problem_parameters["tollerance"])
-        )
-        constraints.append(
-            self.variables["X"][3:5, -1] - self.problem_parameters["goal"][3:5] + self.variables["nu_tc"][3:5]
-            >= -(coeff_toll_vel * self.problem_parameters["tollerance"])
-        )  # final speed boundary condition
-        constraints.append(
-            self.variables["X"][5, -1] - self.problem_parameters["goal"][5] + self.variables["nu_tc"][5]
-            <= (coeff_toll_ang_vel * self.problem_parameters["tollerance"])
-        )
-        constraints.append(
-            self.variables["X"][5, -1] - self.problem_parameters["goal"][5] + self.variables["nu_tc"][5]
-            >= -(coeff_toll_ang_vel * self.problem_parameters["tollerance"])
-        )  # final angular speed boundary condition
+        # Terminal condition
+        for i in range(6):
+            constraints.append(
+                self.variables["X"][i, -1] - self.problem_parameters["goal"][i] + self.variables["nu_tc"][i]
+                <= self.problem_parameters["tollerance"] * 5
+            )
+        # Initial condition
+        for i in range(self.n_x):
+            constraints.append(
+                self.variables["X"][i, 0] - self.problem_parameters["init_state"][i] + self.variables["nu_ic"][i] == 0
+            )
 
         # PROBLEM CONSTRAINTS
         for k in range(self.params.K):
@@ -468,7 +451,7 @@ class SpaceshipPlanner:
             gamma_lambda.append(self.params.lambda_nu * np.linalg.norm(delta[k], ord=1))
 
         # Compute trapezoidal integration
-        delta_t = 1.0 / self.params.K
+        delta_t = self.variables["p"].value / self.params.K
         gamma = 0
         for k in range(self.params.K - 2):
             gamma += delta_t / 2 * (gamma_lambda[k] + gamma_lambda[k + 1])
@@ -484,6 +467,32 @@ class SpaceshipPlanner:
 
         return rho
 
+    def _unnormalize_variables(self):
+        """
+        Normalize variables for SCvx.
+        """
+        # Define normalization parameters
+        S_x = np.zeros((self.n_x, self.n_x))
+        S_u = np.zeros((self.n_u, self.n_u))
+        S_p = np.zeros((self.n_p, self.n_p))
+
+        c_x = np.zeros((self.n_x, 1))
+        c_u = np.zeros((self.n_u, 1))
+        c_p = np.zeros((self.n_p, 1))
+
+        # Define new variables
+        self.new_X = np.zeros((self.n_x, self.params.K))
+        self.new_U = np.zeros((self.n_u, self.params.K))
+        self.new_p = np.zeros((self.n_p, 1))
+
+        # Compute normalization parameters
+
+        # Unnormalize variables
+        for k in range(self.params.K):
+            self.new_X[:, k] = S_x @ self.variables["X"].value[:, k] + c_x
+            self.new_U[:, k] = S_u @ self.variables["U"].value[:, k] + c_u
+            self.new_p = S_p @ self.variables["p"].value + c_p
+
     def _sequence_from_array(self) -> tuple[DgSampledSequence[SpaceshipCommands], DgSampledSequence[SpaceshipState]]:
         # Sequence from an array
         # 1. Create the timestaps
@@ -491,7 +500,7 @@ class SpaceshipPlanner:
 
         # 2. Create the sequences for commands
         F = self.variables["U"].value[0, :]
-        ddelta = self.variables["U"].value[1, :]
+        ddelta = self.new_U[1, :]
         cmds_list = [SpaceshipCommands(f, dd) for f, dd in zip(F, ddelta)]
         mycmds = DgSampledSequence[SpaceshipCommands](timestamps=ts, values=cmds_list)
 
