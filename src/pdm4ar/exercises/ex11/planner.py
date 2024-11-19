@@ -25,7 +25,7 @@ class SolverParameters:
 
     # Cvxpy solver parameters
     solver: str = "ECOS"  # specify solver to use
-    verbose_solver: bool = False  # if True, the optimization steps are shown
+    verbose_solver: bool = True  # if True, the optimization steps are shown
     max_iterations: int = 100  # max algorithm iterations
 
     # SCVX parameters (Add paper reference)
@@ -45,6 +45,10 @@ class SolverParameters:
     K: int = 50  # number of discretization steps
     N_sub: int = 5  # used inside ode solver inside discretization
     stop_crit: float = 1e-5  # Stopping criteria constant
+
+    # Time limits
+    max_time: float = 60.0  # max time for the algorithm
+    min_time: float = 10.0  # min time for the algorithm
 
 
 class SpaceshipPlanner:
@@ -133,15 +137,15 @@ class SpaceshipPlanner:
             # 1. Convexify the dynamic around the current trajectory and assign the values to the problem parameters
             self._convexification()
 
-            if self.problem.is_dcp():
+            """if self.problem.is_dcp():
                 print("Il problema è DCP.")
             else:
-                print("Il problema NON è DCP.")
+                print("Il problema NON è DCP.")"""
 
-            if self.problem.is_dpp():
+            """if self.problem.is_dpp():
                 print("Il problema è DPP.")
             else:
-                print("Il problema NON è DPP.")
+                print("Il problema NON è DPP.")"""
 
             # 2. Solve the problem
             """
@@ -153,7 +157,9 @@ class SpaceshipPlanner:
             """
 
             try:
-                self.error = self.problem.solve(verbose=self.params.verbose_solver, solver=self.params.solver)
+                self.error = self.problem.solve(
+                    verbose=self.params.verbose_solver, solver=self.params.solver, max_iters=1000
+                )
             except cvx.SolverError:
                 print(f"SolverError: {self.params.solver} failed to solve the problem.")
 
@@ -182,8 +188,12 @@ class SpaceshipPlanner:
         X[-1, :] = self.sp.m_v
         X[6, :] = 0.0
 
+        # Linear interpolation between initial and goal state
         for k in range(self.params.K):
             X[:6, k] = self.init_state.as_ndarray()[:6] * (1 - k / K) + self.goal_state.as_ndarray() * (k / K)
+
+        # Define initial guess for p
+        p = np.ones((1)) * (self.params.max_time + self.params.min_time) / 2
 
         return X, U, p
 
@@ -246,40 +256,59 @@ class SpaceshipPlanner:
         coeff_toll_ang_vel: float = 1.0
 
         constraints = []
+        constraints.append(self.variables["p"] <= self.params.max_time)  # time constraint
+        constraints.append(self.variables["p"] >= self.params.min_time)  # time constraint
         constraints.append(self.variables["U"][:, 0] == np.zeros(self.n_u))  # initial control condition
         constraints.append(self.variables["U"][:, -1] == np.zeros(self.n_u))  # terminal control condition
+
+        # BOUDARY CONDITIONS
         constraints.append(
             self.variables["X"][:, 0] - self.problem_parameters["init_state"] + self.variables["nu_ic"][:] == 0
         )  # initial boundary condition
         constraints.append(
-            cvx.sum_squares(self.variables["X"][:2, -1] - self.problem_parameters["goal"][:2])
-            + self.variables["nu_tc"][:2]
-            <= (coeff_toll_pos * self.problem_parameters["tollerance"]) ** 2
+            self.variables["X"][:2, -1] - self.problem_parameters["goal"][:2] + self.variables["nu_tc"][:2]
+            <= (coeff_toll_pos * self.problem_parameters["tollerance"])
         )  # final position boundary condition
         constraints.append(
-            cvx.sum_squares(self.variables["X"][2, -1] - self.problem_parameters["goal"][2])
-            + self.variables["nu_tc"][2]
-            <= (coeff_toll_rot * self.problem_parameters["tollerance"]) ** 2
+            self.variables["X"][:2, -1] - self.problem_parameters["goal"][:2] + self.variables["nu_tc"][:2]
+            >= -(coeff_toll_pos * self.problem_parameters["tollerance"])
+        )  # final position boundary condition
+        constraints.append(
+            self.variables["X"][2, -1] - self.problem_parameters["goal"][2] + self.variables["nu_tc"][2]
+            <= (coeff_toll_rot * self.problem_parameters["tollerance"])
         )  # final orientation boundary condition
         constraints.append(
-            cvx.sum_squares(self.variables["X"][3:5, -1] - self.problem_parameters["goal"][3:5])
-            + self.variables["nu_tc"][3:5]
-            <= (coeff_toll_vel * self.problem_parameters["tollerance"]) ** 2
+            self.variables["X"][2, -1] - self.problem_parameters["goal"][2] + self.variables["nu_tc"][2]
+            >= -(coeff_toll_rot * self.problem_parameters["tollerance"])
+        )
+        constraints.append(
+            self.variables["X"][3:5, -1] - self.problem_parameters["goal"][3:5] + self.variables["nu_tc"][3:5]
+            <= (coeff_toll_vel * self.problem_parameters["tollerance"])
+        )
+        constraints.append(
+            self.variables["X"][3:5, -1] - self.problem_parameters["goal"][3:5] + self.variables["nu_tc"][3:5]
+            >= -(coeff_toll_vel * self.problem_parameters["tollerance"])
         )  # final speed boundary condition
         constraints.append(
-            cvx.sum_squares(self.variables["X"][5, -1] - self.problem_parameters["goal"][5])
-            + self.variables["nu_tc"][5]
-            <= (coeff_toll_ang_vel * self.problem_parameters["tollerance"]) ** 2
+            self.variables["X"][5, -1] - self.problem_parameters["goal"][5] + self.variables["nu_tc"][5]
+            <= (coeff_toll_ang_vel * self.problem_parameters["tollerance"])
+        )
+        constraints.append(
+            self.variables["X"][5, -1] - self.problem_parameters["goal"][5] + self.variables["nu_tc"][5]
+            >= -(coeff_toll_ang_vel * self.problem_parameters["tollerance"])
         )  # final angular speed boundary condition
-        for k in range(self.params.K):
-            constraints.append(self.variables["X"][7, k] >= self.sg.m)  # mass boundary condition
-            constraints.append(self.variables["U"][0, k] >= self.sp.thrust_limits[0])  # thrust boundary condition
-            constraints.append(self.variables["U"][0, k] <= self.sp.thrust_limits[1])  # thrust boundary condition
-            constraints.append(self.variables["X"][6, k] >= self.sp.delta_limits[0])  # nozzle angle boundary condition
-            constraints.append(self.variables["X"][6, k] <= self.sp.delta_limits[1])  # nozzle angle boundary condition
-            constraints.append(self.variables["U"][1, k] >= self.sp.ddelta_limits[0])  # nozzle omega boundary condition
-            constraints.append(self.variables["U"][1, k] <= self.sp.ddelta_limits[1])  # nozzle omega boundary condition
 
+        # PROBLEM CONSTRAINTS
+        for k in range(self.params.K):
+            constraints.append(self.variables["X"][7, k] >= self.sg.m)  # mass condition
+            constraints.append(self.variables["U"][0, k] >= self.sp.thrust_limits[0])  # thrust condition
+            constraints.append(self.variables["U"][0, k] <= self.sp.thrust_limits[1])  # thrust condition
+            constraints.append(self.variables["X"][6, k] >= self.sp.delta_limits[0])  # nozzle angle condition
+            constraints.append(self.variables["X"][6, k] <= self.sp.delta_limits[1])  # nozzle angle condition
+            constraints.append(self.variables["U"][1, k] >= self.sp.ddelta_limits[0])  # nozzle omega condition
+            constraints.append(self.variables["U"][1, k] <= self.sp.ddelta_limits[1])  # nozzle omega condition
+
+        # DYNAMICS CONSTRAINTS
         for k in range(self.params.K - 1):
             constraints.append(
                 self.variables["X"][:, k + 1]
@@ -294,8 +323,9 @@ class SpaceshipPlanner:
                     + self.problem_parameters["r_bar"][:, k]
                     + self.variables["nu"][:, k]
                 )
-            )  # dynamics constraints
+            )
 
+        # TRUST REGION CONSTRAINT
         constraints.append(
             cvx.sum_squares(self.variables["X"] - self.problem_parameters["X_bar"])
             + cvx.sum_squares(self.variables["U"] - self.problem_parameters["U_bar"])

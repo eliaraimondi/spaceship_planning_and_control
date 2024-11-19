@@ -55,6 +55,8 @@ class SpaceshipDyn:
         f[6] = self.u[1]  # deltadot = ddelta
         f[7] = -self.sp.C_T * self.u[0]  # mdot = -C_T*thrust
 
+        f *= self.p[0]
+
         # jacobian() comes from SymPy
         A = f.jacobian(self.x)
         B = f.jacobian(self.u)
