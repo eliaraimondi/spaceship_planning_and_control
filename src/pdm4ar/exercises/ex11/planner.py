@@ -465,18 +465,18 @@ class SpaceshipPlanner:
 
         return rho
 
-    def _unnormalize_variables(self):
+    def _get_normalize_parameters(self):
         """
         Normalize variables for SCvx.
         """
         # Define normalization parameters
-        S_x = np.zeros((self.n_x, self.n_x))
-        S_u = np.zeros((self.n_u, self.n_u))
-        S_p = np.zeros((self.n_p, self.n_p))
+        S_x = np.diag(np.ones(self.n_x))
+        S_u = np.diag(np.ones(self.n_u))
+        S_p = np.diag(np.ones(self.n_p))
 
-        c_x = np.zeros((self.n_x, 1))
-        c_u = np.zeros((self.n_u, 1))
-        c_p = np.zeros((self.n_p, 1))
+        c_x = np.zeros(self.n_x)
+        c_u = np.zeros(self.n_u)
+        c_p = np.zeros(self.n_p)
 
         # Define new variables
         self.new_X = np.zeros((self.n_x, self.params.K))
@@ -484,12 +484,50 @@ class SpaceshipPlanner:
         self.new_p = np.zeros((self.n_p, 1))
 
         # Compute normalization parameters
+        S_vect = np.array(
+            [
+                self.goal_state.x - self.init_state.x + 10,
+                self.goal_state.y - self.init_state.y + 10,
+                2 * np.pi,
+                15,
+                15,
+                15,
+                self.sp.delta_limits[1] - self.sp.delta_limits[0],
+                4 * self.sg.m,
+            ]
+        )
+        S_x[0, 0] = self.goal_state.as_ndarray()[0] - self.init_state.as_ndarray()[0] + 10
+        c_x[0] = self.init_state.as_ndarray()[0] - 5
+        S_x[1, 1] = self.goal_state.as_ndarray()[1] - self.init_state.as_ndarray()[1] + 10
+        c_x[1] = self.init_state.as_ndarray()[1] - 5
+        # Orientation
+        S_x[2, 2] = 2 * np.pi
+        c_x[2] = 0
+        # Velocity
+        S_x[3, 3] = 15
+        c_x[3] = 0
+        S_x[4, 4] = 15
+        c_x[4] = 0
+        # Angular velocity
+        S_x[5, 5] = 15
+        c_x[5] = 0
+        # Delta
+        S_x[6, 6] = self.sp.ddelta_limits[1] - self.sp.ddelta_limits[0]
+        c_x[6] = self.sp.ddelta_limits[0]
+        # Mass
+        S_x[7, 7] = 4 * self.sg.m
+        c_x[7] = self.sg.m
 
-        # Unnormalize variables
-        for k in range(self.params.K):
-            self.new_X[:, k] = S_x @ self.variables["X"].value[:, k] + c_x
-            self.new_U[:, k] = S_u @ self.variables["U"].value[:, k] + c_u
-            self.new_p = S_p @ self.variables["p"].value + c_p
+        # Thrust
+        S_u[0, 0] = self.sp.thrust_limits[1] - self.sp.thrust_limits[0]
+        c_u[0] = self.sp.thrust_limits[0]
+        # Delta speed
+        S_u[1, 1] = self.sp.ddelta_limits[1] - self.sp.ddelta_limits[0]
+        c_u[1] = self.sp.ddelta_limits[0]
+
+        # Time
+        S_p[0, 0] = self.params.max_time - self.params.min_time
+        c_p[0] = self.params.min_time
 
     def _sequence_from_array(self) -> tuple[DgSampledSequence[SpaceshipCommands], DgSampledSequence[SpaceshipState]]:
         # Sequence from an array
