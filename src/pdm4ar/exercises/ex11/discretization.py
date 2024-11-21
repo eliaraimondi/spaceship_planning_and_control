@@ -261,6 +261,11 @@ class FirstOrderHold(DiscretizationMethod):
             self.F_bar[:, k] = (Phi @ P[self.F_bar_ind].reshape((self.n_x, self.n_p))).flatten(order="F")
             self.r_bar[:, k] = Phi @ P[self.r_bar_ind]
 
+        """for k in range(self.K - 1):
+            A_bar_k = self.A_bar[:, k].reshape((self.n_x, self.n_x), order="F")
+            A_bar_k[:, :2] = 0  # Forza le prime due colonne a zero
+            self.A_bar[:, k] = A_bar_k.flatten(order="F")"""
+
         return self.A_bar, self.B_plus_bar, self.B_minus_bar, self.F_bar, self.r_bar
 
     def _ode_dPdt(self, P: NDArray, t: float, u_t0: NDArray, u_t1: NDArray, p: NDArray) -> NDArray:
