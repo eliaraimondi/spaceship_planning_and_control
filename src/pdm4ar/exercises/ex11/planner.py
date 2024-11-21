@@ -26,7 +26,7 @@ class SolverParameters:
     # Cvxpy solver parameters
     solver: str = "ECOS"  # specify solver to use
     verbose_solver: bool = False  # if True, the optimization steps are shown
-    max_iterations: int = 20  # max algorithm iterations
+    max_iterations: int = 30  # max algorithm iterations
 
     # SCVX parameters (Add paper reference)
     lambda_nu: float = 1e5  # slack variable weight
@@ -138,6 +138,20 @@ class SpaceshipPlanner:
             self._convexification()
 
             # 2. Solve the problem
+
+            """check_for_nan_and_inf(self.problem_parameters["A_bar"].value, "A_bar")
+            check_for_nan_and_inf(self.problem_parameters["B_plus_bar"].value, "B_plus_bar")
+            check_for_nan_and_inf(self.problem_parameters["B_minus_bar"].value, "B_minus_bar")
+            check_for_nan_and_inf(self.problem_parameters["F_bar"].value, "F_bar")
+            check_for_nan_and_inf(self.problem_parameters["r_bar"].value, "r_bar")"""
+
+            # Print A_bar, B_plus_bar, B_minus_bar, F_bar, r_bar
+            """print(f"A_bar: {self.problem_parameters['A_bar'].value}")
+            print(f"B_plus_bar: {self.problem_parameters['B_plus_bar'].value}")
+            print(f"B_minus_bar: {self.problem_parameters['B_minus_bar'].value}")
+            print(f"F_bar: {self.problem_parameters['F_bar'].value}")
+            print(f"r_bar: {self.problem_parameters['r_bar'].value}")"""
+
             try:
                 self.error = self.problem.solve(
                     verbose=self.params.verbose_solver, solver=self.params.solver, max_iters=1000
@@ -162,9 +176,11 @@ class SpaceshipPlanner:
         """
         Define initial guess for SCvx.
         """
-        U = np.zeros((self.spaceship.n_u, self.params.K))
-        U[0, :] = 0.5 * (self.sp.thrust_limits[0] + self.sp.thrust_limits[1])
-        U[1, :] = 0.5 * (self.sp.ddelta_limits[0] + self.sp.ddelta_limits[1])
+        K = self.params.K
+
+        X = np.ones((self.spaceship.n_x, K))
+        U = np.zeros((self.spaceship.n_u, K))
+        p = np.zeros((self.spaceship.n_p))
 
         augmented_goal_state = [
             self.goal_state.x,
@@ -178,7 +194,7 @@ class SpaceshipPlanner:
         ]
 
         # Linear interpolation between initial and goal state
-        X = np.linspace(self.init_state.as_ndarray(), augmented_goal_state, self.params.K).T
+        X = np.linspace(self.init_state.as_ndarray(), augmented_goal_state, K).T
 
         # Define initial guess for p
         p = np.ones((1)) * (self.params.max_time + self.params.min_time) / 2
@@ -203,7 +219,7 @@ class SpaceshipPlanner:
             "nu": cvx.Variable((self.spaceship.n_x, self.params.K - 1)),
             # "nu_s": ..., # to define
             "nu_ic": cvx.Variable(self.spaceship.n_x),
-            "nu_tc": cvx.Variable(self.spaceship.n_x - 2),
+            "nu_tc": cvx.Variable(self.spaceship.n_x - 3),
         }
 
         self.n_x = self.spaceship.n_x
@@ -218,6 +234,7 @@ class SpaceshipPlanner:
         """
         problem_parameters = {
             "init_state": cvx.Parameter(self.spaceship.n_x),
+            "init_input": cvx.Parameter(self.spaceship.n_u),
             "goal": cvx.Parameter(6),
             "tollerance": cvx.Parameter(),
             "A_bar": cvx.Parameter((self.n_x * self.n_x, self.params.K - 1)),
@@ -240,12 +257,15 @@ class SpaceshipPlanner:
         constraints = []
 
         # BOUDARY CONDITIONS
+        # time constraint
+        constraints.append(self.variables["p"] <= self.params.max_time)
+        constraints.append(self.variables["p"] >= self.params.min_time)
         # Initial control condition
         constraints.append(self.variables["U"][:, 0] == 0)
         constraints.append(self.variables["U"][:, -1] == 0)
         # Terminal condition
         constraints.append(
-            cvx.norm(self.variables["X"][:6, -1] - self.problem_parameters["goal"] + self.variables["nu_tc"], p=2)
+            self.variables["X"][:5, -1] - self.problem_parameters["goal"][:5] + self.variables["nu_tc"]
             <= self.problem_parameters["tollerance"]
         )
         # Initial condition
@@ -267,14 +287,13 @@ class SpaceshipPlanner:
             constraints.append(
                 self.variables["X"][:, k + 1]
                 == (
-                    cvx.reshape(self.problem_parameters["A_bar"][:, k], (self.n_x, self.n_x), order="F")
+                    cvx.reshape(self.problem_parameters["A_bar"][:, k], (self.n_x, self.n_x))
                     @ self.variables["X"][:, k]
-                    + cvx.reshape(self.problem_parameters["B_plus_bar"][:, k], (self.n_x, self.n_u), order="F")
+                    + cvx.reshape(self.problem_parameters["B_plus_bar"][:, k], (self.n_x, self.n_u))
                     @ self.variables["U"][:, k + 1]
-                    + cvx.reshape(self.problem_parameters["B_minus_bar"][:, k], (self.n_x, self.n_u), order="F")
+                    + cvx.reshape(self.problem_parameters["B_minus_bar"][:, k], (self.n_x, self.n_u))
                     @ self.variables["U"][:, k]
-                    + cvx.reshape(self.problem_parameters["F_bar"][:, k], (self.n_x, self.n_p), order="F")
-                    @ self.variables["p"]
+                    + cvx.reshape(self.problem_parameters["F_bar"][:, k], (self.n_x, self.n_p)) @ self.variables["p"]
                     + self.problem_parameters["r_bar"][:, k]
                     + self.variables["nu"][:, k]
                 )
@@ -282,10 +301,10 @@ class SpaceshipPlanner:
 
         # TRUST REGION CONSTRAINT
         constraints.append(
-            cvx.norm(self.variables["X"] - self.problem_parameters["X_bar"], p=1)
-            + cvx.norm(self.variables["U"] - self.problem_parameters["U_bar"], p=1)
-            + cvx.norm(self.variables["p"] - self.problem_parameters["p_bar"], p=1)
-            <= self.problem_parameters["eta"]
+            cvx.sum_squares(self.variables["X"] - self.problem_parameters["X_bar"])
+            + cvx.sum_squares(self.variables["U"] - self.problem_parameters["U_bar"])
+            + cvx.sum_squares(self.variables["p"] - self.problem_parameters["p_bar"])
+            <= self.problem_parameters["eta"] ** 2
         )
 
         return constraints
@@ -304,18 +323,15 @@ class SpaceshipPlanner:
         # Define gamma lambda
         gamma_lambda = []
         for k in range(self.params.K - 1):
-            gamma_lambda.append(self.params.lambda_nu * cvx.norm(self.variables["nu"][:, k], p=1))
-            # gamma_lambda.append(
-            #    self.params.lambda_nu
-            #    * cvx.norm1(self.variables["nu"][:, k] + self.params.lambda_nu * cvx.norm1(self.variables["nu_s"][:, k]))
-            # )
-        # gamma_lambda.append(self.params.lambda_nu * cvx.norm1(self.variables["nu_s"][:, self.params.K]))
+            gamma_lambda.append(
+                self.params.lambda_nu * cvx.norm1(self.variables["nu"][:, k])
+            )  # da aggiornare con i nu_s
 
         # Compute trapezoidal integration
         delta_t = 1.0 / self.params.K
         gamma = 0
         for k in range(self.params.K - 2):
-            gamma += delta_t / 2 * (gamma_lambda[k] + gamma_lambda[k + 1])
+            gamma += cvx.multiply(delta_t / 2, (gamma_lambda[k] + gamma_lambda[k + 1]))
         # Define objective
         objective = phi_lambda + gamma
 
@@ -351,7 +367,7 @@ class SpaceshipPlanner:
         """
         Check convergence of SCvx.
         """
-        delta_x = [np.linalg.norm(self.variables["X"].value[:, k] - self.X_bar[:, k]) for k in range(self.params.K)]
+        delta_x = np.linalg.norm(self.variables["X"].value - self.X_bar, axis=0)
         delta_p = np.linalg.norm(self.variables["p"].value - self.p_bar)
 
         return bool(delta_p + np.max(delta_x) <= self.params.stop_crit)
@@ -386,33 +402,25 @@ class SpaceshipPlanner:
         Compute rho for trust region update.
         """
         flow_map_opt = [
-            self.problem_parameters["A_bar"][:, k].value.reshape((self.n_x, self.n_x), order="F")
+            np.reshape(self.problem_parameters["A_bar"][:, k].value, (self.n_x, self.n_x))
             @ self.variables["X"][:, k].value
-            + self.problem_parameters["B_plus_bar"][:, k].value.reshape((self.n_x, self.n_u), order="F")
+            + np.reshape(self.problem_parameters["B_plus_bar"][:, k].value, (self.n_x, self.n_u))
             @ self.variables["U"][:, k + 1].value
-            + self.problem_parameters["B_minus_bar"][:, k].value.reshape((self.n_x, self.n_u), order="F")
+            + np.reshape(self.problem_parameters["B_minus_bar"][:, k].value, (self.n_x, self.n_u))
             @ self.variables["U"][:, k].value
-            + self.problem_parameters["F_bar"][:, k].value.reshape((self.n_x, self.n_p), order="F")
-            @ self.variables["p"].value
+            + np.reshape(self.problem_parameters["F_bar"][:, k].value, (self.n_x, self.n_p)) @ self.variables["p"].value
             + self.problem_parameters["r_bar"][:, k].value
             for k in range(self.params.K - 1)
         ]
 
         flow_map_bar = [
-            self.problem_parameters["A_bar"][:, k].value.reshape((self.n_x, self.n_x), order="F") @ self.X_bar[:, k]
-            + self.problem_parameters["B_plus_bar"][:, k].value.reshape((self.n_x, self.n_u), order="F")
-            @ self.U_bar[:, k + 1]
-            + self.problem_parameters["B_minus_bar"][:, k].value.reshape((self.n_x, self.n_u), order="F")
-            @ self.U_bar[:, k]
-            + self.problem_parameters["F_bar"][:, k].value.reshape((self.n_x, self.n_p), order="F") @ self.p_bar
+            np.reshape(self.problem_parameters["A_bar"][:, k].value, (self.n_x, self.n_x)) @ self.X_bar[:, k]
+            + np.reshape(self.problem_parameters["B_plus_bar"][:, k].value, (self.n_x, self.n_u)) @ self.U_bar[:, k + 1]
+            + np.reshape(self.problem_parameters["B_minus_bar"][:, k].value, (self.n_x, self.n_u)) @ self.U_bar[:, k]
+            + np.reshape(self.problem_parameters["F_bar"][:, k].value, (self.n_x, self.n_p)) @ self.p_bar
             + self.problem_parameters["r_bar"][:, k].value
             for k in range(self.params.K - 1)
         ]
-
-        """for k in range(self.params.K - 1):
-            print(f"flow_map_opt: {flow_map_opt[k]}")
-            print(f"nu_k: {self.variables['nu'][:, k].value}")
-            print(f"X_k+1: {self.variables['X'][:, k + 1].value}")"""
 
         delta_opt = [self.variables["X"][:, k + 1].value - flow_map_opt[k] for k in range(self.params.K - 1)]
         delta_bar = [self.X_bar[:, k + 1] - flow_map_bar[k] for k in range(self.params.K - 1)]
